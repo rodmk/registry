@@ -116,12 +116,31 @@ for extension in "$${EXTENSIONLIST[@]}"; do
   fi
 done
 
-if [ "${AUTO_INSTALL_EXTENSIONS}" = true ]; then
-  if ! command -v jq > /dev/null; then
-    echo "jq is required to install extensions from a workspace file."
-    exit 0
+# Parse extension IDs from a JSONC file (extensions.json or .code-workspace).
+# Uses node for full JSONC support (comments, trailing commas), falls back to sed+jq.
+# $1: file path, $2: jq selector (e.g. .recommendations or .extensions.recommendations)
+parse_jsonc_extensions() {
+  local file="$1" selector="$2"
+  if command -v node > /dev/null 2>&1; then
+    node -e "
+      var s = require('fs').readFileSync(process.argv[1], 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*/g, '')
+        .replace(/,(\s*[\]}])/g, '\$1');
+      var keys = process.argv[2].split('.').filter(Boolean);
+      var v = JSON.parse(s);
+      for (var i = 0; i < keys.length; i++) v = (v || {})[keys[i]];
+      (Array.isArray(v) ? v : []).forEach(function(e) { console.log(e); });
+    " "$file" "$selector" 2> /dev/null
+  elif command -v jq > /dev/null 2>&1; then
+    sed 's|//.*||g' "$file" | jq -r "($selector // [])[]"
+  else
+    echo "Warning: node or jq is required to install extensions from a workspace file." >&2
+    return 1
   fi
+}
 
+if [ "${AUTO_INSTALL_EXTENSIONS}" = true ]; then
   WORKSPACE_DIR="$HOME"
   if [ -n "${FOLDER}" ]; then
     WORKSPACE_DIR="${FOLDER}"
@@ -129,8 +148,7 @@ if [ "${AUTO_INSTALL_EXTENSIONS}" = true ]; then
 
   if [ -f "$WORKSPACE_DIR/.vscode/extensions.json" ]; then
     printf "🧩 Installing extensions from %s/.vscode/extensions.json...\n" "$WORKSPACE_DIR"
-    # Use sed to remove single-line comments before parsing with jq
-    extensions=$(sed 's|//.*||g' "$WORKSPACE_DIR"/.vscode/extensions.json | jq -r '.recommendations[]')
+    extensions=$(parse_jsonc_extensions "$WORKSPACE_DIR/.vscode/extensions.json" ".recommendations")
     for extension in $extensions; do
       if extension_installed "$extension"; then
         continue

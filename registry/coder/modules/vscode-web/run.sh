@@ -150,31 +150,50 @@ for extension in "$${EXTENSIONLIST[@]}"; do
   fi
 done
 
-if [ "${AUTO_INSTALL_EXTENSIONS}" = true ]; then
-  if ! command -v jq > /dev/null; then
-    echo "jq is required to install extensions from a workspace file."
+# Parse extension IDs from a JSONC file (extensions.json or .code-workspace).
+# Uses node for full JSONC support (comments, trailing commas), falls back to sed+jq.
+# $1: file path, $2: jq selector (e.g. .recommendations or .extensions.recommendations)
+parse_jsonc_extensions() {
+  local file="$1" selector="$2"
+  if command -v node > /dev/null 2>&1; then
+    node -e "
+      var s = require('fs').readFileSync(process.argv[1], 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*/g, '')
+        .replace(/,(\s*[\]}])/g, '\$1');
+      var keys = process.argv[2].split('.').filter(Boolean);
+      var v = JSON.parse(s);
+      for (var i = 0; i < keys.length; i++) v = (v || {})[keys[i]];
+      (Array.isArray(v) ? v : []).forEach(function(e) { console.log(e); });
+    " "$file" "$selector" 2> /dev/null
+  elif command -v jq > /dev/null 2>&1; then
+    sed 's|//.*||g' "$file" | jq -r "($selector // [])[]"
   else
-    # Prefer WORKSPACE if set and points to a file
-    if [ -n "${WORKSPACE}" ] && [ -f "${WORKSPACE}" ]; then
-      printf "🧩 Installing extensions from %s...\n" "${WORKSPACE}"
-      # Strip single-line comments then parse .extensions.recommendations[]
-      extensions=$(sed 's|//.*||g' "${WORKSPACE}" | jq -r '(.extensions.recommendations // [])[]')
+    echo "Warning: node or jq is required to install extensions from a workspace file." >&2
+    return 1
+  fi
+}
+
+if [ "${AUTO_INSTALL_EXTENSIONS}" = true ]; then
+  # Prefer WORKSPACE if set and points to a file
+  if [ -n "${WORKSPACE}" ] && [ -f "${WORKSPACE}" ]; then
+    printf "🧩 Installing extensions from %s...\n" "${WORKSPACE}"
+    extensions=$(parse_jsonc_extensions "${WORKSPACE}" ".extensions.recommendations")
+    for extension in $extensions; do
+      $VSCODE_WEB "$EXTENSION_ARG" --install-extension "$extension" --force
+    done
+  else
+    # Fallback to folder-based .vscode/extensions.json (existing behavior)
+    WORKSPACE_DIR="$HOME"
+    if [ -n "${FOLDER}" ]; then
+      WORKSPACE_DIR="${FOLDER}"
+    fi
+    if [ -f "$WORKSPACE_DIR/.vscode/extensions.json" ]; then
+      printf "🧩 Installing extensions from %s/.vscode/extensions.json...\n" "$WORKSPACE_DIR"
+      extensions=$(parse_jsonc_extensions "$WORKSPACE_DIR/.vscode/extensions.json" ".recommendations")
       for extension in $extensions; do
         $VSCODE_WEB "$EXTENSION_ARG" --install-extension "$extension" --force
       done
-    else
-      # Fallback to folder-based .vscode/extensions.json (existing behavior)
-      WORKSPACE_DIR="$HOME"
-      if [ -n "${FOLDER}" ]; then
-        WORKSPACE_DIR="${FOLDER}"
-      fi
-      if [ -f "$WORKSPACE_DIR/.vscode/extensions.json" ]; then
-        printf "🧩 Installing extensions from %s/.vscode/extensions.json...\n" "$WORKSPACE_DIR"
-        extensions=$(sed 's|//.*||g' "$WORKSPACE_DIR/.vscode/extensions.json" | jq -r '.recommendations[]')
-        for extension in $extensions; do
-          $VSCODE_WEB "$EXTENSION_ARG" --install-extension "$extension" --force
-        done
-      fi
     fi
   fi
 fi
